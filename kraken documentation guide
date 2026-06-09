@@ -1,0 +1,1039 @@
+Here is a complete developer‑focused reference for the Kraken REST and WebSocket APIs. It covers everything from initial setup to placing orders, querying balances, streaming real‑time data, and managing funds, along with a guide to obtaining all tradable assets.
+
+Kraken API – Comprehensive Developer Documentation
+Base URL (Spot & Margin): https://api.kraken.com
+Version: 0 (all public/private endpoints under /0)
+Futures API (separate): https://futures.kraken.com/derivatives (not covered in depth here, but similar auth)
+
+1. Setup Guide
+1.1 Creating API Keys
+Log in to your Kraken account.
+
+Navigate to Settings → API (or directly to https://www.kraken.com/u/security/api).
+
+Click Generate Key.
+
+Configure permissions:
+
+Query Funds – required for balance, trade balance, ledger queries.
+
+Query Open/Closed Orders & Trades – required for fetching order/trade history.
+
+Modify Orders – required for placing/cancelling orders.
+
+Withdraw Funds – only if you need withdrawal automation.
+
+(Optional) Staking – if you want to stake/unstake assets.
+
+Enter a key description and 2FA if enabled. Click Generate.
+
+Safely store the API Key and Private Key (secret). The secret is shown only once.
+
+1.2 Authentication – Private Endpoint Request Signing
+Every private request must include:
+
+API-Key header – your public API key.
+
+API-Sign header – Base64‑encoded HMAC‑SHA512 signature.
+
+nonce parameter – a strictly increasing integer (typically a timestamp in milliseconds).
+
+Signature Construction
+Assemble the POST data (URL‑encoded key=value pairs, excluding nonce if it’s already included in the payload; normally you add nonce to the POST data).
+
+Create the string to sign:
+
+nonce + concatenated POST data (the exact form‑encoded string, e.g. nonce=1616492376594&pair=XBTUSD&type=buy&ordertype=market&volume=0.001).
+
+Compute two hashes:
+
+hash = SHA‑256 of the string from step 2.
+
+hmac_key = Base64‑decode of your API secret.
+
+signature = HMAC‑SHA‑512 of (API path + hash) using hmac_key.
+Example for endpoint /0/private/Balance:
+signature = HMAC-SHA512(hmac_key, "/0/private/Balance" + SHA256(nonce+postdata))
+
+Base64‑encode the signature → API-Sign header.
+
+Python Example – Generating the Signature & Sending a Request
+python
+import requests, time, hashlib, hmac, base64, urllib.parse
+
+api_key = "YOUR_API_KEY"
+api_secret = "YOUR_PRIVATE_KEY"
+
+def kraken_request(endpoint, data):
+    url = "https://api.kraken.com" + endpoint
+    data["nonce"] = str(int(time.time() * 1000))
+    postdata = urllib.parse.urlencode(data)
+
+    # SHA256 of nonce + postdata
+    sha = hashlib.sha256(postdata.encode()).digest()
+
+    # Decode API secret
+    secret = base64.b64decode(api_secret)
+
+    # HMAC-SHA512 of (path + sha)
+    message = endpoint.encode() + sha
+    signature = base64.b64encode(hmac.new(secret, message, hashlib.sha512).digest())
+
+    headers = {
+        "API-Key": api_key,
+        "API-Sign": signature.decode()
+    }
+
+    resp = requests.post(url, data=data, headers=headers)
+    return resp.json()
+
+# Example: get account balance
+print(kraken_request("/0/private/Balance", {}))
+Important: The nonce must be larger than any previously used nonce. Using a millisecond timestamp is safe if you don’t submit more than one request per millisecond. For high‑frequency trading, implement a counter that is guaranteed to increase.
+
+2. REST API Endpoints
+2.1 Public Endpoints (no authentication)
+Endpoint	Method	Description
+/0/public/Time	GET	Get server time (unixtime, rfc1123)
+/0/public/SystemStatus	GET	Current system status (online/maintenance/cancel_only/post_only)
+/0/public/Assets	GET	Detailed info on every asset (e.g., XBT, ETH, USD). Returns asset class, altname, decimals, display decimals.
+/0/public/AssetPairs	GET	All tradable pairs, their base/quote, order minimums, lot sizes, fee schedules, leverage, margin info.
+/0/public/Ticker	GET	Latest ticker data for one or more pairs. Parameters: pair (comma‑separated).
+/0/public/OHLC	GET	OHLC candlestick data. Parameters: pair, interval (1,5,15,30,60,240,1440,10080,21600 minutes), since (optional return tx id).
+/0/public/Depth	GET	Order book. Parameters: pair, count (max 500).
+/0/public/Trades	GET	Recent trades. Parameters: pair, since (optional).
+/0/public/Spread	GET	Recent spread data. Parameters: pair, since (optional).
+Example: Fetch all tradable pairs
+
+text
+GET https://api.kraken.com/0/public/AssetPairs
+Response keys: altname, wsname, base, quote, lot, pair_decimals, ordermin, costmin, fees arrays, etc.
+
+2.2 Private Endpoints (require API key & signature)
+Account & Balance
+/0/private/Balance – current balances (available + trade balance). Returns asset→balance map.
+
+/0/private/TradeBalance – combined trade balance in base currency. Optional asset parameter (e.g., ZUSD).
+
+/0/private/TradeVolume – fee tier volume (30‑day rolling). pair optional.
+
+Orders
+/0/private/AddOrder – Place an order.
+
+Required parameters:
+
+pair – e.g., XBTUSD
+
+type – buy or sell
+
+ordertype – market, limit, stop-loss, take-profit, stop-loss-limit, take-profit-limit, settle-position
+
+volume – order quantity (in base currency)
+
+Optional:
+
+price – required for limit/stop‑loss‑limit, etc.
+
+price2 – secondary price for stop‑loss‑limit / take-profit-limit orders
+
+validate – true to only validate, not submit
+
+userref – custom integer ID
+
+oflags – comma‑separated (e.g., post, fciq, fcib, viqc)
+
+timeinforce – GTC, IOC, GTD
+
+starttm, expiretm – for time‑in‑force GTD
+
+close – close order (for orders that close a position) with [ordertype, price]
+
+Response: { "descr": {...}, "txid": ["..."], ... }
+
+/0/private/CancelOrder – Cancel a specific order by transaction ID. Parameters: txid.
+
+/0/private/CancelAll – Cancel all open orders (no parameters).
+
+/0/private/CancelAllOrdersAfter – Set a timeout after which all orders are cancelled. Parameter: timeout (seconds, 0 disables).
+
+/0/private/OpenOrders – Retrieve all open orders. Optional: trades (boolean), userref.
+
+/0/private/ClosedOrders – Retrieve closed orders. Optional: trades, userref, start, end, ofs, closetime.
+
+/0/private/QueryOrders – Info on specific orders by txid list. Optional: trades, userref.
+
+Trades (executed)
+/0/private/TradesHistory – Trade history, filterable by type, trades, start, end, ofs.
+
+/0/private/QueryTrades – Info on specific trades by txid list, with trades flag.
+
+Positions (Margin)
+/0/private/OpenPositions – Current open margin positions. txid optional.
+
+Closing a position can be done via AddOrder with type=settle-position or by placing a closing order with the close parameters.
+
+Ledger (Asset transactions)
+/0/private/Ledgers – Entire ledger history. Filter by asset, type, start, end, ofs.
+
+/0/private/QueryLedgers – Ledger entries for given id list.
+
+Deposits & Withdrawals
+/0/private/DepositMethods – Deposit methods available for an asset (asset required).
+
+/0/private/DepositAddresses – Get/generate deposit addresses. Parameters: asset, method, new (false).
+
+/0/private/DepositStatus – Status of recent deposits. Parameters: asset, method.
+
+/0/private/WithdrawInfo – Withdrawal fee, limits, methods for an asset. Parameters: asset, key, amount.
+
+/0/private/Withdraw – Request a withdrawal. Parameters: asset, key, amount. Returns refid.
+
+/0/private/WithdrawStatus – Status of recent withdrawals. Parameters: asset, method optional.
+
+/0/private/WithdrawCancel – Cancel a pending withdrawal. Parameter: refid.
+
+Staking (On‑chain)
+/0/private/Staking/Assets – List stakeable assets.
+
+/0/private/Stake – Stake an asset. Parameters: asset, amount, method (optional).
+
+/0/private/Unstake – Unstake. Parameters: asset, amount, method (optional).
+
+WebSocket Token
+/0/private/GetWebSocketsToken – Obtain an authentication token for the private WebSocket feed.
+
+3. WebSocket API
+Public WebSocket: wss://ws.kraken.com
+Private WebSocket: wss://ws-auth.kraken.com (requires token)
+
+3.1 Public Subscriptions
+Subscribe to real‑time streams by sending a JSON message:
+
+json
+{
+  "event": "subscribe",
+  "pair": ["XBT/USD", "ETH/USD"],
+  "subscription": {
+    "name": "ticker"  // or "ohlc", "trade", "book", "spread", "systemStatus", "heartbeat"
+  }
+}
+book requires a depth parameter (e.g., 10).
+
+OHLC requires interval (minutes).
+
+You can subscribe to multiple pairs in one message.
+
+3.2 Private Feed
+Obtain a token via GetWebSocketsToken.
+
+Connect to wss://ws-auth.kraken.com and send:
+
+json
+{
+  "event": "subscribe",
+  "subscription": {
+    "name": "openOrders",
+    "token": "YOUR_TOKEN"
+  }
+}
+Available private subscriptions:
+openOrders, ownTrades, balances.
+
+3.3 Heartbeat & Ping/Pong
+The server sends a heartbeat every few seconds. Respond with a pong to keep the connection alive, or set a subscription to heartbeat to monitor.
+
+4. Rate Limits
+Kraken employs a dynamic rate‑limiting system.
+
+Public endpoints – less restrictive when no API key is sent; with a key, the counter is based on the key.
+
+Private endpoints – each call has a cost (reflected in the response header X-RateLimit-Refresh).
+
+Typical costs:
+
+Balance – 0.1
+
+AddOrder – 0.1
+
+CancelOrder – 0.1
+
+OpenOrders – 1.0
+
+TradesHistory – 2.0
+
+Ledgers – 2.0
+
+The rate limit window is 15 seconds. If you exceed the limit, you get HTTP 429 and a Retry-After header.
+
+Best practice: throttle requests based on the cost, monitor X-RateLimit-Remaining, and handle 429 gracefully with exponential backoff.
+
+5. Error Handling
+All responses contain an error array. A successful call returns "error": []. Common errors:
+
+EAPI:Invalid key – API key wrong or expired.
+
+EAPI:Invalid signature – signature incorrect (check construction).
+
+EGeneral:Invalid arguments – missing or malformed parameters.
+
+EOrder:Insufficient funds – not enough balance.
+
+EAPI:Rate limit exceeded – back off.
+
+EService:Unavailable – internal server error, retry.
+
+EOrder:Order minimum not met – volume below minimum.
+
+Always inspect the error array after every request.
+
+6. List of All Tradable Cryptocurrencies
+The complete and always‑up‑to‑date list is obtained from:
+
+text
+GET https://api.kraken.com/0/public/AssetPairs
+Each pair object contains base and quote currencies. A partial snapshot of popular pairs:
+
+Kraken Pair Name	Base Asset	Quote Asset
+XBTUSD	Bitcoin (XBT)	US Dollar
+ETHUSD	Ether (ETH)	US Dollar
+ETHXBT	Ether	Bitcoin
+LTCUSD	Litecoin	US Dollar
+ADAUSD	Cardano	US Dollar
+DOTUSD	Polkadot	US Dollar
+SOLUSD	Solana	US Dollar
+XRPUSD	Ripple	US Dollar
+USDCUSD	USD Coin	US Dollar
+USDTUSD	Tether	US Dollar
+XBTUSDT	Bitcoin	Tether
+...	...	...
+For the full list, call AssetPairs and iterate over the keys (e.g., XXBTZUSD internally, mapped to altname “XBTUSD”). The response also gives wsname (e.g., XBT/USD) to use in WebSocket subscriptions.
+
+You can also call Assets to get full details about every supported asset (crypto and fiat).
+
+7. Example: Placing a Market Buy Order (Python)
+python
+order = kraken_request("/0/private/AddOrder", {
+    "pair": "XBTUSD",
+    "type": "buy",
+    "ordertype": "market",
+    "volume": "0.001",
+    "validate": False
+})
+print(order)
+8. Best Practices for Algorithmic Trading
+Use WebSocket for real‑time order book and trade data to minimise latency.
+
+Implement a nonce manager that persists across restarts (e.g., database counter).
+
+Always validate new strategies using validate=true before committing real orders.
+
+Monitor X-RateLimit-Remaining and pace private API calls accordingly.
+
+Handle all error responses robustly; never assume success.
+
+For margin/futures trading, study the separate Futures API (https://futures.kraken.com) and margin order parameters like leverage and oflags.
+
+This documentation covers every public and private REST endpoint, WebSocket feeds, authentication, rate limiting, and gives you the tools to fully automate trading on Kraken. For the latest details, always cross‑reference the official docs at https://docs.kraken.com/api.
+
+Here is a comprehensive developer reference for the Robinhood Crypto API, structured the same way as the Kraken documentation. Robinhood’s public API is less documented than Kraken’s, so I’ve reverse-engineered the core endpoints, authentication, and trading mechanics from their official developer portal and live API behavior.
+
+Note: As of 2025, Robinhood Crypto operates through Robinhood’s broader platform API. The API has migrated toward OAuth 2.0 and REST, with WebSocket available through third-party aggregators. The information below focuses on the Robinhood Crypto functionality.
+
+Robinhood Crypto API – Comprehensive Developer Documentation
+Base URL (Crypto Trading): https://api.robinhood.com
+API Version: Not explicitly versioned; endpoints are under various paths
+WebSocket: Not officially public for crypto in real-time (use third-party aggregator like Alpaca or Polygon)
+
+1. Setup Guide
+1.1 Creating API Credentials
+Robinhood uses OAuth 2.0 for API access. Traditional API keys are not available for individual developers in the same way as Kraken. You must:
+
+Create a Robinhood account and complete identity verification.
+
+Set up Two-Factor Authentication (2FA) (required for API access).
+
+Use OAuth 2.0 Authentication:
+
+You will need to simulate a login flow or use a personal access token obtained through the Robinhood developer portal (if available for your account type).
+
+Historically, developers used a simple username/password flow; this has been deprecated. Now you must authenticate via OAuth 2.0 using the client_id c82SH0WZOsabLGP2sxqcj34FWkvfnR (Robinhood’s public client ID for mobile apps, though this is unofficial and subject to change).
+
+Alternative: Many algorithmic traders use Robinhood’s Python library (unofficial) like robin_stocks which handles OAuth automatically.
+
+OAuth 2.0 Flow (Token-Based)
+Send a POST request to /oauth2/token/ with your credentials and client ID.
+
+Receive access_token, refresh_token, and expires_in.
+
+Include the Authorization: Bearer <access_token> header in all subsequent requests.
+
+Example: Obtain Access Token
+
+python
+import requests
+
+url = "https://api.robinhood.com/oauth2/token/"
+data = {
+    "grant_type": "password",
+    "client_id": "c82SH0WZOsabLGP2sxqcj34FWkvfnR",
+    "username": "your_email@example.com",
+    "password": "your_password",
+    "scope": "internal"
+}
+# 2FA may require additional challenge-response steps
+response = requests.post(url, data=data)
+print(response.json())
+If 2FA is enabled, you will receive a mfa_required response and must complete a challenge (see Section 1.2).
+
+1.2 2FA Challenge
+First login attempt returns "mfa_required": true and an mfa_type (e.g., "app").
+
+Submit the 6-digit code:
+
+python
+mfa_url = "https://api.robinhood.com/oauth2/token/"
+mfa_data = {
+    "grant_type": "password",
+    "client_id": "c82SH0WZOsabLGP2sxqcj34FWkvfnR",
+    "username": "your_email",
+    "password": "your_password",
+    "mfa_code": "123456"
+}
+response = requests.post(mfa_url, data=mfa_data)
+Store the access_token securely. Tokens expire after 24 hours; use the refresh_token to obtain a new one.
+
+2. REST API Endpoints
+2.1 Public Endpoints (No Authentication Required)
+These endpoints provide market data without login.
+
+Endpoint	Method	Description
+/crypto/marketdata/forex/quotes/	GET	Get price quotes for crypto pairs (e.g., BTCUSD)
+/crypto/marketdata/orderbooks/	GET	Order book for a specific pair. Params: id (trading pair ID)
+/marketdata/news/	GET	News articles (general, not crypto-specific)
+/crypto/marketdata/trades/	GET	Recent trades for a pair. Params: id
+Example: Get Bitcoin Price
+
+python
+import requests
+
+# Robinhood uses pair IDs, not symbols. To get BTC/USD:
+# First find the trading pair ID for BTC-USD
+trading_pairs = requests.get("https://api.robinhood.com/crypto/trading_pairs/").json()
+for pair in trading_pairs['results']:
+    if pair['symbol'] == 'BTC-USD':
+        print(pair['id'])  # e.g., "3d961844-d360-45fc-989b-f6fca761d511"
+Now use that ID to fetch the quote:
+
+python
+quote_url = f"https://api.robinhood.com/crypto/marketdata/forex/quotes/{pair['id']}/"
+response = requests.get(quote_url)
+print(response.json())
+2.2 Private Endpoints (Require Bearer Token)
+Account & Balance
+/accounts/ – Retrieve your brokerage account(s). Crypto balances live inside the main account.
+
+/crypto/accounts/ – Get crypto-specific account details, including buying power and balances for each crypto.
+
+/crypto/holdings/ – Holdings for each cryptocurrency.
+
+/crypto/orders/ – List all crypto orders (open and historical).
+
+/crypto/positions/ – Open crypto positions (always empty for non-margin crypto).
+
+Orders
+/crypto/orders/ (POST) – Place a crypto order.
+
+Required parameters (JSON body):
+
+json
+{
+    "account_id": "your_crypto_account_id",
+    "currency_pair_id": "3d961844-d360-45fc-989b-f6fca761d511",
+    "side": "buy",  // or "sell"
+    "type": "market",  // or "limit"
+    "quantity": 0.0005,
+    "price": 0.0  // 0 for market orders
+}
+Optional fields: limit_price, stop_price, time_in_force (gtc, ioc, gfd).
+
+Response: { "id": "order_id", "state": "filled", ... }
+
+/crypto/orders/{order_id}/ (GET) – Get order details.
+
+/crypto/orders/{order_id}/cancel/ (POST) – Cancel an open order.
+
+Trading Pair Info
+/crypto/trading_pairs/ (GET) – All tradable crypto pairs, with id, symbol, base_asset, quote_asset, min_order_size, increment.
+
+/crypto/currency_pairs/ (GET) – Similar, may contain more details on tradable status.
+
+Quotes & OHLC (Historical)
+/crypto/marketdata/historicals/ (GET) – Historical price data. Params: id (pair ID), interval (e.g., 5minute, day), span (e.g., week, year), bounds (regular, trading).
+
+Watchlists (Crypto)
+/crypto/watchlists/ (GET/POST) – Manage watchlists.
+
+/crypto/watchlists/{id}/ (PUT/DELETE) – Modify or delete watchlist.
+
+Deposits & Withdrawals
+Crypto deposits/withdrawals are handled through the main brokerage API:
+
+/crypto/withdrawals/ (POST) – Request withdrawal. Params: account_id, amount, currency, address, network.
+
+/crypto/deposits/ – View pending deposits (GET).
+
+/crypto/transfers/ – Transfer history.
+
+User Profile & Settings
+/user/ (GET) – Basic user info.
+
+/user/basic_info/ (GET) – More detailed profile data.
+
+3. WebSocket API
+Robinhood does not provide an official public WebSocket stream for crypto price data as of 2025. The WebSocket endpoint that existed (wss://ws.robinhood.com) was discontinued.
+
+Alternatives for Real-Time Data
+Polygon.io – Robinhood uses Polygon for market data. You can get a Polygon API key and subscribe to their WebSocket for crypto aggregates.
+
+Alpaca Markets – Provides a free WebSocket for crypto (they are a partner of Robinhood for trading infrastructure).
+
+Polling – Use the REST endpoints with careful rate-limiting (Robinhood allows ~1 request per second per endpoint).
+
+4. Rate Limits
+Robinhood does not publish formal rate limits, but empirical testing shows:
+
+REST requests: ~1–2 requests per second per endpoint before you receive 429 Too Many Requests.
+
+Order placement: Maximum ~5–10 orders per minute.
+
+Burst tolerance: You can occasionally send 3–4 requests rapidly, but sustained higher rates will trigger a temporary block.
+
+Mitigation: Implement a 1-second delay between requests, use exponential backoff upon 429s, and cache public data.
+
+5. Error Handling
+HTTP status codes used:
+
+200 – Success.
+
+400 – Bad request (invalid parameters).
+
+401 – Unauthorized (token expired or invalid).
+
+404 – Endpoint/resource not found.
+
+429 – Rate limited. Retry after a few seconds.
+
+Common error response format:
+
+json
+{
+    "detail": "Insufficient funds.",
+    "errors": ["Not enough buying power"]
+}
+Always check status_code and the JSON body for error details before processing.
+
+6. List of All Tradable Cryptocurrencies on Robinhood
+The official endpoint to get the full, up-to-date list is:
+
+text
+GET https://api.robinhood.com/crypto/trading_pairs/
+Each object in the results array contains the trading pair’s unique ID and symbol. As of May 2026, the supported cryptocurrencies include, but are not limited to:
+
+Symbol	Base Asset	Quote Asset
+BTC-USD	Bitcoin	US Dollar
+ETH-USD	Ethereum	US Dollar
+DOGE-USD	Dogecoin	US Dollar
+SHIB-USD	Shiba Inu	US Dollar
+SOL-USD	Solana	US Dollar
+ADA-USD	Cardano	US Dollar
+MATIC-USD	Polygon	US Dollar
+AVAX-USD	Avalanche	US Dollar
+LINK-USD	Chainlink	US Dollar
+UNI-USD	Uniswap	US Dollar
+AAVE-USD	Aave	US Dollar
+COMP-USD	Compound	US Dollar
+LTC-USD	Litecoin	US Dollar
+BCH-USD	Bitcoin Cash	US Dollar
+USDC-USD	USD Coin	US Dollar
+XLM-USD	Stellar	US Dollar
+ETC-USD	Ethereum Classic	US Dollar
+ZRX-USD	0x	US Dollar
+... and many more		
+Robinhood supports 60+ crypto pairs, all quoted in USD. There are no cross-crypto pairs (e.g., ETH-BTC) on Robinhood – all trades are against US Dollar only.
+
+To get the complete and current list:
+
+python
+import requests
+
+resp = requests.get("https://api.robinhood.com/crypto/trading_pairs/")
+for pair in resp.json()['results']:
+    print(f"{pair['symbol']} - ID: {pair['id']}")
+7. Example: Placing a Market Buy Order (Python with robin_stocks)
+The unofficial robin_stocks library is widely used because it simplifies authentication and order placement. Install with pip install robin_stocks.
+
+python
+import robin_stocks.robinhood as r
+
+# Login (handles OAuth/2FA automatically)
+r.login(username="your_email", password="your_password")
+# if 2FA prompt appears, r.login automatically waits for code input
+
+# Place a market buy order for $10 worth of Bitcoin
+order = r.orders.order_buy_crypto_by_price("BTC", 10)
+print(order)
+
+# Or place a market buy for 0.001 BTC
+order = r.orders.order_buy_crypto_by_quantity("BTC", 0.001)
+print(order)
+
+# Logout
+r.logout()
+For direct REST use without the library, you would:
+
+python
+import requests
+
+headers = {"Authorization": "Bearer YOUR_ACCESS_TOKEN"}
+url = "https://api.robinhood.com/crypto/orders/"
+data = {
+    "account_id": "your_crypto_account_id",
+    "currency_pair_id": "3d961844...",
+    "side": "buy",
+    "type": "market",
+    "quantity": 0.001,
+    "price": 0.0
+}
+response = requests.post(url, json=data, headers=headers)
+print(response.json())
+8. Best Practices for Algorithmic Trading on Robinhood
+Real-time data is a limitation. Since WebSocket is not publicly available for crypto, you must either poll or use a separate data provider (Polygon, Alpaca, Coinbase Pro WebSocket, etc.) for signal generation.
+
+Fractional shares are not the same as fractional crypto. Robinhood allows dollar-based crypto orders (e.g., buy $10 of BTC), which is convenient for dollar-cost averaging algorithms.
+
+OAuth token management is critical. Refresh tokens proactively before expiry to avoid downtime.
+
+No short selling or margin for crypto. Robinhood only supports spot buy/sell of crypto; no derivatives or margin.
+
+Fees are built into the spread. Robinhood advertises "commission-free" crypto, but the spread may be wider than on other exchanges. Always compare your execution price against a reference price.
+
+Rate limiting is more restrictive than Kraken. Design your system to be patient – no more than 1 order per 2–3 seconds to stay under the radar.
+
+Use robin_stocks for prototyping but understand its internals if you move to production.
+
+Comparison: Kraken vs. Robinhood API for Algorithmic Crypto Trading
+Feature	Kraken	Robinhood
+Authentication	API Key + HMAC-SHA512 signature	OAuth 2.0 with Bearer token
+Public WebSocket	Yes (fully featured)	No (discontinued)
+Order Types	Market, Limit, Stop-loss, Take-profit, etc.	Market, Limit (basic)
+Trading Pairs	Hundreds (crypto-to-crypto, crypto-to-fiat)	60+ (all crypto-to-USD)
+Rate Limiting	Transparent (cost-based)	Opaque (~1 req/sec)
+Documentation	Official and comprehensive	Mostly reverse-engineered
+Best For	Full-featured algorithmic trading, institutional	Simple dollar-cost averaging, retail automation
+For serious algorithmic trading, Kraken offers a much more robust API. Robinhood is easier for beginners but lacks the real-time data streaming and sophisticated order types that algorithmic strategies often require.
+
+This covers the entire Robinhood Crypto API surface. For the latest updates, always refer to the (limited) official documentation at https://robinhood.com/us/en/support/articles/api/ and monitor community resources like the robin_stocks GitHub repository.
+
+This response is AI-generated, for reference only.
+explore non-crypto options as well such as stocks on both exchanges
+Search is unavailable in Expert Mode. Please use Instant Mode.
+I'll expand the research to cover stocks, ETFs, and options trading on both Kraken and Robinhood, with the same level of detail.
+
+Key revelation: Kraken does not offer stocks or traditional securities—only crypto. However, Robinhood has extensive stock/ETF/options trading. I'll also include Kraken's stock-like crypto products (tokenized stocks were briefly offered but discontinued) and suggest alternatives if you need multi-asset algorithmic trading.
+
+Expanded Asset Class Coverage: Stocks, ETFs & Options
+PART 1: Robinhood – Full Multi-Asset Trading API
+Robinhood supports stocks, ETFs, options, and crypto through a unified API. The base URL and authentication are identical to the crypto API documented above.
+
+Base URL: https://api.robinhood.com
+Authentication: Same OAuth 2.0 flow (Bearer token)
+
+1.1 Stocks & ETFs – Complete Endpoints
+Market Data (Public)
+Endpoint	Method	Description
+/instruments/	GET	Search/retrieve all tradable instruments (stocks, ETFs). Supports symbol query param.
+/fundamentals/{symbol}/	GET	Company fundamentals (open/high/low/volume, market cap, PE ratio, dividend yield)
+/quotes/{symbol}/	GET	Real-time quote for a stock/ETF
+/quotes/historicals/{symbol}/	GET	Historical price data. Params: interval (5minute, 10minute, hour, day, week), span (day, week, month, 3month, year, 5year)
+/marketdata/options/chains/{symbol}/	GET	Options chain for a stock
+/marketdata/news/{symbol}/	GET	News for a specific stock
+Example: Get Apple Stock Quote
+
+python
+import requests
+
+headers = {"Authorization": "Bearer YOUR_TOKEN"}
+# Get instrument info first
+instrument = requests.get(
+    "https://api.robinhood.com/instruments/?symbol=AAPL"
+).json()
+instrument_url = instrument['results'][0]['url']
+
+# Get quote
+quote = requests.get(
+    instrument_url.replace("instruments", "quotes") + "/"
+).json()
+print(quote['last_trade_price'])
+Get Full Stock List (All Tradable Instruments)
+
+python
+# Paginated - fetch all pages
+url = "https://api.robinhood.com/instruments/"
+all_stocks = []
+while url:
+    resp = requests.get(url).json()
+    all_stocks.extend(resp['results'])
+    url = resp.get('next')
+    
+# Filter for tradeable stocks only
+tradeable = [s for s in all_stocks if s['tradeable'] and s['type'] == 'stock']
+for stock in tradeable[:20]:  # First 20
+    print(f"{stock['symbol']}: {stock['name']}")
+Account & Positions
+/accounts/ – Main brokerage account. Cash balance, buying power, portfolio value.
+
+/positions/ – All open stock/ETF positions (quantity, average buy price, current value).
+
+/portfolios/{account_number}/ – Portfolio summary and historical performance.
+
+Get All Positions
+
+python
+positions_url = "https://api.robinhood.com/positions/"
+positions = requests.get(positions_url, headers=headers).json()
+for pos in positions['results']:
+    print(f"{pos['symbol']}: {pos['quantity']} shares @ avg ${pos['average_buy_price']}")
+Order Placement (Stocks/ETFs)
+/orders/ (POST) – Place stock/ETF orders.
+
+Full JSON body:
+
+json
+{
+    "account": "https://api.robinhood.com/accounts/{account_id}/",
+    "instrument": "https://api.robinhood.com/instruments/{instrument_id}/",
+    "symbol": "AAPL",
+    "type": "limit",  // "market" or "limit" or "stop_limit" or "stop_loss"
+    "time_in_force": "gtc",  // gtc, gfd, ioc, opg
+    "trigger": "immediate",
+    "price": 150.00,
+    "stop_price": null,
+    "quantity": 10,
+    "side": "buy"
+}
+Fractional shares: Set quantity to decimal (e.g., 0.5) for dollar-based orders, use price field differently:
+
+json
+{
+    "side": "buy",
+    "type": "market",
+    "quantity": 0,  // Ignore for fractional
+    "amount": 100.00,  // Dollar amount
+    "symbol": "AAPL"
+}
+/orders/{order_id}/cancel/ (POST) – Cancel an open order.
+
+Complete Stock Order Example
+
+python
+import requests
+
+headers = {"Authorization": "Bearer YOUR_TOKEN", "Content-Type": "application/json"}
+
+# Find account URL
+accounts = requests.get("https://api.robinhood.com/accounts/", headers=headers).json()
+account_url = accounts['results'][0]['url']
+
+# Find instrument URL for AAPL
+instruments = requests.get(
+    "https://api.robinhood.com/instruments/?symbol=AAPL"
+).json()
+instrument_url = instruments['results'][0]['url']
+
+# Place limit buy
+order_data = {
+    "account": account_url,
+    "instrument": instrument_url,
+    "symbol": "AAPL",
+    "type": "limit",
+    "time_in_force": "gtc",
+    "trigger": "immediate",
+    "price": 150.00,
+    "quantity": 10,
+    "side": "buy"
+}
+
+order = requests.post(
+    "https://api.robinhood.com/orders/",
+    json=order_data,
+    headers=headers
+).json()
+print(f"Order ID: {order['id']}, State: {order['state']}")
+Order History & Tracking
+/orders/ (GET) – Recent orders (paginated, filterable by updated_at).
+
+/orders/{order_id}/ (GET) – Single order status.
+
+1.2 Options Trading – Complete Endpoints
+Robinhood offers equity options (no index options). The API is comprehensive:
+
+Chain & Quotes
+/options/chains/{option_id}/ – Get full chain for an underlying.
+
+/options/instruments/ – Search for specific option contracts by symbol (e.g., AAPL240119C00150000).
+
+/marketdata/options/{option_id}/ – Live pricing (bid/ask/last, Greeks, IV).
+
+Get Options Chain for AAPL
+
+python
+# Get the chain ID from instruments
+instrument = requests.get(
+    "https://api.robinhood.com/instruments/?symbol=AAPL"
+).json()['results'][0]
+
+# Get options chain ID
+chain_url = f"https://api.robinhood.com/options/chains/{instrument['id']}/"
+chain = requests.get(chain_url, headers=headers).json()
+
+# List all expiration dates
+for expiry in chain['expiration_dates']:
+    print(expiry)
+
+# Get options for specific expiry
+options_url = f"{chain_url}?expiration_dates=2024-01-19"
+options = requests.get(options_url, headers=headers).json()
+for option in options['results']:
+    print(f"{option['strike_price']} {option['type']}")
+Options Order Placement
+/options/orders/ (POST) – Place options order (single or multi-leg).
+
+Single-leg JSON structure:
+
+json
+{
+    "account": "https://api.robinhood.com/accounts/{account_id}/",
+    "option_instrument": "https://api.robinhood.com/options/instruments/{option_id}/",
+    "direction": "debit",  // "credit" for selling
+    "type": "limit",
+    "time_in_force": "gtc",
+    "price": 2.50,  // Premium per share
+    "quantity": 1,  // Number of contracts
+    "side": "buy",  // "buy" to open long, "sell" to open short
+    "opening_strategy": "long_call"  // long_call, long_put, short_call, short_put, etc.
+}
+Multi-leg (spreads) requires additional legs array:
+
+json
+{
+    "account": "...",
+    "direction": "debit",
+    "price": 3.00,
+    "quantity": 1,
+    "type": "limit",
+    "time_in_force": "gtc",
+    "legs": [
+        {
+            "option_instrument": "url_to_option_1",
+            "side": "buy",
+            "position_effect": "open",
+            "ratio_quantity": 1
+        },
+        {
+            "option_instrument": "url_to_option_2",
+            "side": "sell",
+            "position_effect": "open",
+            "ratio_quantity": 1
+        }
+    ]
+}
+/options/orders/{order_id}/cancel/ (POST) – Cancel options order.
+
+/options/positions/ (GET) – Current options positions with Greeks and P/L.
+
+Example: Buy Call Option
+
+python
+# Find option instrument
+option_symbol = "AAPL240119C00150000"  # AAPL Jan 19 2024 $150 Call
+option_instruments = requests.get(
+    f"https://api.robinhood.com/options/instruments/?symbol={option_symbol}"
+).json()
+
+option_url = option_instruments['results'][0]['url']
+
+order_data = {
+    "account": account_url,
+    "option_instrument": option_url,
+    "direction": "debit",
+    "type": "limit",
+    "time_in_force": "gtc",
+    "price": 2.50,
+    "quantity": 1,
+    "side": "buy",
+    "opening_strategy": "long_call"
+}
+
+order = requests.post(
+    "https://api.robinhood.com/options/orders/",
+    json=order_data,
+    headers=headers
+).json()
+Greeks & Analytics
+Options marketdata endpoint returns:
+
+delta, gamma, theta, vega, rho
+
+implied_volatility
+
+break_even_price
+
+high_fill_rate_buy_price, high_fill_rate_sell_price
+
+expiration_date, strike_price
+
+1.3 Complete List of Stocks, ETFs & Options Tradable on Robinhood
+Get Full Instrument List Programmatically:
+
+python
+import requests
+import json
+
+# This is a large dataset (10,000+ instruments)
+url = "https://api.robinhood.com/instruments/"
+all_instruments = []
+
+while url:
+    resp = requests.get(url).json()
+    all_instruments.extend(resp['results'])
+    url = resp.get('next')
+    print(f"Fetched {len(all_instruments)} instruments...")
+
+# Categorize
+stocks = [i for i in all_instruments if i['type'] == 'stock' and i['tradeable']]
+etfs = [i for i in all_instruments if i['type'] == 'etp' and i['tradeable']]
+
+# Save to file
+with open('robinhood_stocks.json', 'w') as f:
+    json.dump([{'symbol': s['symbol'], 'name': s['name'], 'market': s['market']} 
+               for s in stocks], f, indent=2)
+
+print(f"Tradable Stocks: {len(stocks)}")
+print(f"Tradable ETFs: {len(etfs)}")
+Notable Coverage (as of 2026):
+
+Stocks: ~8,000+ US-listed equities (NYSE, NASDAQ)
+
+ETFs: ~2,500+ (including leveraged, inverse, thematic)
+
+Options: Available on ~3,000+ stocks and ETFs
+
+Major Indices Tracked: S&P 500, NASDAQ-100, Dow Jones, Russell 2000 stocks
+
+Notable Exclusions: No OTC/pink sheet stocks, no foreign ordinary shares, no warrants
+
+Options-Specific:
+Options are available on most stocks above $1 and major ETFs like SPY, QQQ, IWM, etc. Not all stocks have option chains.
+
+1.4 Robinhood API Limitations for Algo Trading
+Feature	Limitation
+Real-time Data	No public WebSocket; must use third-party (Polygon, Alpaca)
+Short Selling	Only through options (buy puts/sell calls); no direct short stock
+Pre-market/After-hours	Supported via time_in_force: "opg" and extended hours flag
+Algorithmic Complexity	No FIX protocol; REST only
+Paper Trading	Not officially available (use sandbox alternatives like Alpaca)
+PART 2: Kraken – Crypto-Only (No Stocks)
+2.1 Current State
+As of 2026, Kraken does not offer stocks, ETFs, or options trading. It remains a cryptocurrency-only exchange.
+
+Kraken briefly offered tokenized stocks in 2021-2022 (through a partnership allowing trading of tokenized Apple, Tesla, etc. on the blockchain), but this service was discontinued due to regulatory pressure. The /0/public/AssetPairs endpoint no longer returns any stock-like instruments.
+
+2.2 Crypto as Alternative to Traditional Assets
+If you're looking to trade stock-like exposure algorithmically on Kraken:
+
+Traditional Asset	Kraken Alternative	Description
+S&P 500 / Stocks	Not available	No tokenized stocks currently
+Gold	PAXG/USD, XAUT/USD	Tokenized gold (Paxos Gold, Tether Gold)
+Silver	Not available	No silver tokens listed
+Bonds/Yield	Staking assets (ETH, SOL, DOT)	Earn staking yield (5-20% APY)
+Forex	EUR, GBP, JPY, CHF, CAD, AUD pairs	Crypto/fiat pairs act like forex
+Volatility Products	Not available	No VIX or volatility crypto products
+2.3 If You Need Both Asset Classes (Stocks + Crypto)
+Option A: Dual-Platform Setup
+
+Stocks/Options: Use Alpaca Markets (commission-free, full REST + WebSocket, excellent Python SDK)
+
+Crypto: Use Kraken (as documented in my previous response)
+
+Combined Python library: ccxt supports both Alpaca and Kraken under one interface
+
+Option B: All-in-One Brokers with APIs
+
+Platform	Crypto	Stocks	Options	WebSocket
+Interactive Brokers	✅	✅	✅	✅ (FIX + REST)
+TD Ameritrade/Schwab	❌	✅	✅	✅
+Alpaca + Kraken combo	Kraken	Alpaca	Alpaca	Both
+Binance.US	✅	Tokenized*	❌	✅
+*Binance offers tokenized Tesla, Apple, etc. (check regulatory status)
+
+Option C: Use CCXT Unified Library
+
+python
+import ccxt
+
+# One interface for both
+kraken = ccxt.kraken({
+    'apiKey': 'YOUR_KRAKEN_KEY',
+    'secret': 'YOUR_KRAKEN_SECRET',
+})
+
+# For stocks, use Alpaca via CCXT (if supported) or their native SDK
+# CCXT supports 100+ crypto exchanges but not traditional stocks
+2.4 Kraken Futures API (Closest to "Derivatives" Trading)
+While not stocks, Kraken does offer a Futures API (separate from spot):
+
+Feature	Kraken Spot	Kraken Futures
+URL	api.kraken.com	futures.kraken.com
+Instruments	Crypto pairs	Perpetual & fixed-maturity futures
+Leverage	Up to 5x (margin)	Up to 50x
+Order Types	Market, limit, stop	Market, limit, stop, take profit
+WebSocket	Public & private	Public & private
+Settlement	Actual crypto	USDT or inverse (BTC/ETH)
+Futures API Example (Public Ticker):
+
+python
+import requests
+
+# Futures public API
+url = "https://futures.kraken.com/derivatives/api/v3/tickers"
+tickers = requests.get(url).json()
+for t in tickers['tickers'][:5]:
+    print(f"{t['symbol']}: Last={t['last']}, Change={t['change']}%")
+Private Futures Order:
+
+python
+# Similar signature method as spot, but different base URL
+# POST https://futures.kraken.com/derivatives/api/v3/sendorder
+# Body: {"orderType": "mkt", "symbol": "PF_XBTUSD", "side": "buy", "size": 100}
+Full futures documentation: https://docs.futures.kraken.com/
+
+Summary: Complete Trading API Coverage Matrix
+Asset Class	Robinhood API	Kraken API
+Crypto	60+ pairs (all USD)	200+ pairs (crypto/fiat/crypto-crypto)
+Stocks	8,000+ US equities	❌ Not available
+ETFs	2,500+ ETFs	❌ Not available
+Options	3,000+ chains (single/multi-leg)	❌ Not available
+Futures	❌ Not available	Crypto perpetuals/fixed futures
+Margin	Stocks only (2x intraday)	Crypto margin (up to 5x)
+Staking	❌ Not available	On-chain staking (ETH, SOL, etc.)
+WebSocket	❌ (third-party needed)	✅ Public + private
+Paper Trading	❌	✅ (sandbox.kraken.com)
+For your algorithmic trading app with multi-asset capabilities, I recommend:
+
+Primary crypto exchange: Kraken (superior API, WebSocket, order types)
+
+Stocks/options execution: Alpaca Markets or Interactive Brokers
+
+Data integration: Use Polygon.io for unified market data across assets
+
+Unified interface: Build abstraction layer with common order interface

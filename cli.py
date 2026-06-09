@@ -5,13 +5,13 @@ Command-line interface for the crypto trading bot
 import sys
 import argparse
 from datetime import datetime
-import config
-from logger import logger
-from database import db
-from cold_start import cold_start
-from position_manager import position_manager
-from metrics import metrics_calc
-from robinhood_client import client
+from core import config
+from core.logger import logger
+from core.database import db
+from bot.cold_start import cold_start
+from bot.position_manager import position_manager
+from bot.metrics import metrics_calc
+from exchanges.robinhood_client import client
 
 
 def cmd_start():

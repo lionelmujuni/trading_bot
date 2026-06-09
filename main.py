@@ -6,14 +6,14 @@ import sys
 import time
 from datetime import datetime
 import schedule
-import config
-from logger import logger
-from database import db
-from cold_start import cold_start, BotState
-from indicators import indicator_calc
-from position_manager import position_manager
-from strategy import strategy
-from metrics import metrics_calc
+from core import config
+from core.logger import logger
+from core.database import db
+from bot.cold_start import cold_start, BotState
+from bot.indicators import indicator_calc
+from bot.position_manager import position_manager
+from bot.strategy import strategy
+from bot.metrics import metrics_calc
 
 
 class CryptoBot:
